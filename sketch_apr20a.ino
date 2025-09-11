@@ -154,7 +154,7 @@ bool hasStoredCredentials = false;
 const bool USE_AUTOMATIC_NETWORK_SELECTION = true;  // Set to false to use manual network selection
 
 // OTA Configuration
-const String FIRMWARE_VERSION = "1.0.27";  // Current firmware version
+const String FIRMWARE_VERSION = "1.0.32";  // Current firmware version
 const String OTA_CHECK_ENDPOINT = "/firmware/check/";  // Firmware version check endpoint
 const String OTA_DOWNLOAD_ENDPOINT = "/firmware/";  // Firmware download endpoint
 bool otaInProgress = false;
@@ -299,6 +299,7 @@ struct PWMConfig {
   bool isConfigured = false;
   bool isBlocked = false;
   bool interruptDetachedForBlock = false;  // Track if ISR was detached during block
+  bool usePCNT = true;              // Prefer hardware pulse counter if available
   unsigned long blockStartTime = 0;  // New: Track when blocking starts
   unsigned long blockDuration = 0;   // New: How long to block for
   volatile unsigned long pulseCount = 0;
@@ -307,12 +308,18 @@ struct PWMConfig {
   const unsigned long READING_INTERVAL = 100;  // Take readings every 100ms
   const unsigned long SEND_INTERVAL = 1000;    // Send data every 1 seconds
   unsigned long lastSendTime = 0;
+  unsigned long aggregatedPulses = 0;          // Aggregate pulses for each send window
+  unsigned long aggregateStartTime = 0;        // Start time of current aggregation window
   const int HISTORY_SIZE = 20;       // Store last 20 readings
   float frequencyHistory[20];        // Circular buffer for frequency history
   int historyIndex = 0;              // Current index in history buffer
+  int historyCount = 0;              // Number of valid entries in history
   const int CONSISTENT_COUNT = 4;    // Number of consistent readings needed
   int consistentReadings = 0;        // Counter for consistent readings
   unsigned long lastPulseCount = 0;  // Last pulse count for comparison
+  unsigned long sendSuppressUntil = 0; // Suppress sending until this time (ms)
+  int zeroStreak = 0;                // Count consecutive zero-interval windows
+  int suppressedOutlierStreak = 0;   // Count consecutive outlier suppressions
 } pwmConfig;
 
 // Move interrupt handler declaration before it's used
@@ -422,13 +429,15 @@ public:
             if (config.containsKey("p")) {
               int newPin = config["p"];
               if (newPin != pwmConfig.inputPin) {
-                if (pwmConfig.isConfigured) {
+                if (pwmConfig.isConfigured && !pwmConfig.usePCNT) {
                   detachInterrupt(digitalPinToInterrupt(pwmConfig.inputPin));
                 }
                 
                 pwmConfig.inputPin = newPin;
                 pinMode(newPin, INPUT);
-                attachInterrupt(digitalPinToInterrupt(newPin), handlePWMInterrupt, RISING);
+                if (!pwmConfig.usePCNT) {
+                  attachInterrupt(digitalPinToInterrupt(newPin), handlePWMInterrupt, RISING);
+                }
                 pwmConfig.isConfigured = true;
                 pwmConfig.pulseCount = 0;
                 
@@ -513,13 +522,15 @@ public:
               if (pinStr.length() > 0) {
                 int newPin = pinStr.toInt();
                 if (newPin > 0 && newPin != pwmConfig.inputPin) {
-                  if (pwmConfig.isConfigured) {
+                  if (pwmConfig.isConfigured && !pwmConfig.usePCNT) {
                     detachInterrupt(digitalPinToInterrupt(pwmConfig.inputPin));
                   }
                   
                   pwmConfig.inputPin = newPin;
                   pinMode(newPin, INPUT);
-                  attachInterrupt(digitalPinToInterrupt(newPin), handlePWMInterrupt, RISING);
+                  if (!pwmConfig.usePCNT) {
+                    attachInterrupt(digitalPinToInterrupt(newPin), handlePWMInterrupt, RISING);
+                  }
                   pwmConfig.isConfigured = true;
                   pwmConfig.pulseCount = 0;
                   
@@ -558,13 +569,15 @@ public:
         int newPin = pwmConfig["input_pin"] | -1;
         
         if (newPin != -1 && newPin != ::pwmConfig.inputPin) {
-          if (::pwmConfig.isConfigured) {
+          if (::pwmConfig.isConfigured && !::pwmConfig.usePCNT) {
             detachInterrupt(digitalPinToInterrupt(::pwmConfig.inputPin));
           }
           
           ::pwmConfig.inputPin = newPin;
           pinMode(newPin, INPUT);
-          attachInterrupt(digitalPinToInterrupt(newPin), handlePWMInterrupt, RISING);
+          if (!::pwmConfig.usePCNT) {
+            attachInterrupt(digitalPinToInterrupt(newPin), handlePWMInterrupt, RISING);
+          }
           ::pwmConfig.isConfigured = true;
           ::pwmConfig.pulseCount = 0;
           
@@ -4398,7 +4411,17 @@ void loop() {
         pwmConfig.lastPulseTime = 0;
         interrupts();
         pwmConfig.lastReadingTime = millis();
+        // Suppress sends for a short settling window to avoid spurious 0/huge values
+        pwmConfig.sendSuppressUntil = millis() + 300; // 300ms
+        pwmConfig.zeroStreak = 0;
+        pwmConfig.historyCount = 0;
+        pwmConfig.suppressedOutlierStreak = 0;
+        pwmConfig.aggregatedPulses = 0;
+        pwmConfig.aggregateStartTime = millis();
       }
+      // Resume PCNT if used
+      extern void pwmResumeCountingAfterBlock();
+      pwmResumeCountingAfterBlock();
     }
   }
 
