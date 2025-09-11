@@ -1,4 +1,5 @@
 #include <ArduinoJson.h>
+// Removed PCNT-based implementation, reverting to ISR-based pulse counting
 
 // ... existing code ...
 void startPWM(int pin, int dutyCycle) {
@@ -22,7 +23,7 @@ void sendPWMReadings() {
     noInterrupts();
     unsigned long pulseCount = pwmConfig.pulseCount;
     interrupts();
-    Serial.println(pulseCount);
+    if (Serial.availableForWrite() > 32) Serial.println(pulseCount);
     if (pulseCount == 0) {
       pwmConfig.lastReadingTime = currentTime;
       pwmConfig.consistentReadings = 0;
@@ -46,9 +47,11 @@ void sendPWMReadings() {
         String userId = macToUUID();
         String message = "[\"" + String(roomRef) + "\",\"" + String(roomRef) + "\",\"user:" + userId + "\",\"pwm_readings\"," + payload + "]";
         webSocket.sendTXT(message);
-        Serial.print("Sent consistent PWM reading - Frequency: ");
-        Serial.print(currentFrequency);
-        Serial.println(" Hz");
+        if (Serial.availableForWrite() > 32) {
+          Serial.print("Sent consistent PWM reading - Frequency: ");
+          Serial.print(currentFrequency);
+          Serial.println(" Hz");
+        }
         pwmConfig.consistentReadings = 0;
       }
     } else {
@@ -57,4 +60,4 @@ void sendPWMReadings() {
     pwmConfig.lastPulseCount = pulseCount;
     pwmConfig.lastReadingTime = currentTime;
   }
-} 
+}

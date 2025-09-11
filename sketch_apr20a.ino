@@ -154,7 +154,7 @@ bool hasStoredCredentials = false;
 const bool USE_AUTOMATIC_NETWORK_SELECTION = true;  // Set to false to use manual network selection
 
 // OTA Configuration
-const String FIRMWARE_VERSION = "1.0.22";  // Current firmware version
+const String FIRMWARE_VERSION = "1.0.27";  // Current firmware version
 const String OTA_CHECK_ENDPOINT = "/firmware/check/";  // Firmware version check endpoint
 const String OTA_DOWNLOAD_ENDPOINT = "/firmware/";  // Firmware download endpoint
 bool otaInProgress = false;
@@ -298,6 +298,7 @@ struct PWMConfig {
   int inputPin = -1;  // Default to -1 (not set)
   bool isConfigured = false;
   bool isBlocked = false;
+  bool interruptDetachedForBlock = false;  // Track if ISR was detached during block
   unsigned long blockStartTime = 0;  // New: Track when blocking starts
   unsigned long blockDuration = 0;   // New: How long to block for
   volatile unsigned long pulseCount = 0;
@@ -781,6 +782,15 @@ public:
     pwmConfig.blockStartTime = millis();
     pwmConfig.blockDuration = (unsigned long)(reps * (delayTime + 0.1) * 1000) + 100;
     pwmConfig.isBlocked = true;
+    // Detach ISR during block to prevent any readings leaking through
+    if (pwmConfig.isConfigured && !pwmConfig.interruptDetachedForBlock) {
+      detachInterrupt(digitalPinToInterrupt(pwmConfig.inputPin));
+      pwmConfig.interruptDetachedForBlock = true;
+      noInterrupts();
+      pwmConfig.pulseCount = 0;
+      pwmConfig.lastPulseTime = 0;
+      interrupts();
+    }
     
     if (debugEnabled) {
       Serial.println("🔒 PWM operations blocked for " + String(pwmConfig.blockDuration) + "ms");
@@ -2937,7 +2947,13 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
     case WStype_TEXT:
       if (debugEnabled) {
-        Serial.printf("WebSocket message received: %s\n", payload);
+        static unsigned long lastWSLog = 0;
+        unsigned long now = millis();
+        if (now - lastWSLog > 500) {
+          String view = String((const char*)payload).substring(0, 120);
+          Serial.printf("WebSocket message received: %s...\n", view.c_str());
+          lastWSLog = now;
+        }
       }
       processMessage((char*)payload);
       break;
@@ -2983,7 +2999,12 @@ void processMessage(String message) {
   String event = doc[3] | "";
 
   if (debugEnabled) {
-    Serial.printf("Received event: %s\n", event.c_str());
+    static unsigned long lastEventLog = 0;
+    unsigned long now = millis();
+    if (now - lastEventLog > 300) {
+      Serial.printf("Received event: %s\n", event.c_str());
+      lastEventLog = now;
+    }
   }
 
   // Handle i_am_online response
@@ -3051,6 +3072,15 @@ void processMessage(String message) {
     pwmConfig.blockStartTime = millis();
     pwmConfig.blockDuration = totalDuration + 100;  // Add 100ms buffer
     pwmConfig.isBlocked = true;
+    // Detach ISR during block to prevent any readings leaking through
+    if (pwmConfig.isConfigured && !pwmConfig.interruptDetachedForBlock) {
+      detachInterrupt(digitalPinToInterrupt(pwmConfig.inputPin));
+      pwmConfig.interruptDetachedForBlock = true;
+      noInterrupts();
+      pwmConfig.pulseCount = 0;
+      pwmConfig.lastPulseTime = 0;
+      interrupts();
+    }
 
     // Save current emulator mode state and temporarily disable it
     bool wasEmulatorMode = emulatorMode;
@@ -3174,7 +3204,7 @@ void processMessage(String message) {
         pwmConfig.lastPulseTime = 0;
         pwmConfig.lastReadingTime = 0;
 
-        // Serial.printf("Configured PWM reading on pin %d\n", newPin);
+        Serial.printf("Configured PWM reading on pin %d\n", newPin);
       }
     }
 
@@ -4359,6 +4389,16 @@ void loop() {
   if (pwmConfig.isBlocked) {
     if (currentMillis - pwmConfig.blockStartTime >= pwmConfig.blockDuration) {
       pwmConfig.isBlocked = false;
+      // Reattach ISR after block and reset counters
+      if (pwmConfig.isConfigured && pwmConfig.interruptDetachedForBlock) {
+        attachInterrupt(digitalPinToInterrupt(pwmConfig.inputPin), handlePWMInterrupt, RISING);
+        pwmConfig.interruptDetachedForBlock = false;
+        noInterrupts();
+        pwmConfig.pulseCount = 0;
+        pwmConfig.lastPulseTime = 0;
+        interrupts();
+        pwmConfig.lastReadingTime = millis();
+      }
     }
   }
 
@@ -4422,9 +4462,8 @@ void loop() {
     }
   }
 
-  // Send PWM readings if configured
-  bool connectionReady = SKIP_WIFI ? a7670cConnected : (WiFi.status() == WL_CONNECTED);
-  if (pwmConfig.isConfigured && connectionReady && startedWebsocket) {
+  // Send/print PWM readings if configured (serial prints always; WS send guarded inside)
+  if (pwmConfig.isConfigured) {
     sendPWMReadings();
   }
 
