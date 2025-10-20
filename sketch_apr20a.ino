@@ -13,13 +13,13 @@
 #include <WiFiClientSecure.h>  // For secure HTTP connections
 #include "mbedtls/sha256.h"
 
-
+const String FIRMWARE_VERSION = "1.0.35";  // Current firmware version
 const String globalUrl = "139.162.60.209";
 const int globalPort = 2579;
 // const String globalUrl = "170.187.226.48";
 // const int globalPort = 4060;
 // A7670C Configuration - Add these new variables
-const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
+const bool SKIP_WIFI = true;  // Set to true to use A7670C instead of WiFi
 const bool SKIP_RS232 = true;  // Set to true to completely disable RS232 emulator functionality
 // Add: toggle for operator selection mode (auto vs manual ACTIVE_MCC_MNC)
 const bool A7670C_AUTO_OPERATOR_SELECT = true;  // true = AT+COPS=0 (auto), false = manual using ACTIVE_MCC_MNC
@@ -154,7 +154,7 @@ bool hasStoredCredentials = false;
 const bool USE_AUTOMATIC_NETWORK_SELECTION = true;  // Set to false to use manual network selection
 
 // OTA Configuration
-const String FIRMWARE_VERSION = "1.0.32";  // Current firmware version
+
 const String OTA_CHECK_ENDPOINT = "/firmware/check/";  // Firmware version check endpoint
 const String OTA_DOWNLOAD_ENDPOINT = "/firmware/";  // Firmware download endpoint
 bool otaInProgress = false;
@@ -3773,7 +3773,7 @@ void restartSmartConfig() {
 // Setup function
 void setup() {
   pinMode(INPUT_PIN, INPUT_PULLUP);  // Set input pin (e.g., button) with pull-up
-  pinMode(33, INPUT);
+  // pinMode(33, INPUT);
   pinMode(BOOT_BUTTON, INPUT_PULLUP);  // Set BOOT button pin
   pinMode(LED_BUILTIN, OUTPUT);  // Initialize LED pin
   Serial.begin(115200);  // Keep this one as it's needed for PWM readings output
@@ -4023,8 +4023,12 @@ void setup() {
 
 
   // Initialize bill acceptor serial
-  billAcceptorSerial.begin(9600, SERIAL_8N2, 32, 33, false); // Changed from 25,26 to 32,33
-  delay(2000);
+  if (!SKIP_RS232) {
+    billAcceptorSerial.begin(9600, SERIAL_8N2, 32, 33, false); // Changed from 25,26 to 32,33
+    delay(2000);
+  }
+
+
 
   while (billAcceptorSerial.available()) {
     billAcceptorSerial.read();
