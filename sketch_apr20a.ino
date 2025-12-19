@@ -13,13 +13,13 @@
 #include <WiFiClientSecure.h>  // For secure HTTP connections
 #include "mbedtls/sha256.h"
 
-const String FIRMWARE_VERSION = "1.0.35";  // Current firmware version
+const String FIRMWARE_VERSION = "1.0.41";  // Current firmware version
 const String globalUrl = "139.162.60.209";
 const int globalPort = 2579;
 // const String globalUrl = "170.187.226.48";
 // const int globalPort = 4060;
 // A7670C Configuration - Add these new variables
-const bool SKIP_WIFI = true;  // Set to true to use A7670C instead of WiFi
+const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
 const bool SKIP_RS232 = true;  // Set to true to completely disable RS232 emulator functionality
 // Add: toggle for operator selection mode (auto vs manual ACTIVE_MCC_MNC)
 const bool A7670C_AUTO_OPERATOR_SELECT = true;  // true = AT+COPS=0 (auto), false = manual using ACTIVE_MCC_MNC
@@ -27,7 +27,8 @@ const bool A7670C_AUTO_OPERATOR_SELECT = true;  // true = AT+COPS=0 (auto), fals
 const bool A7670C_SLOW_MODE = false;  // If true, use longer timeouts and waits for AT commands
 const unsigned long A7670C_DEFAULT_CMD_TIMEOUT = 15000;  // 15s default for general AT commands
 const unsigned long A7670C_LONG_CMD_TIMEOUT = 120000;     // 120s for long-running ops like AT+COPS
-HardwareSerial a7670cSerial(1);  // Use Serial1 for A7670C (Serial2 is used for bill acceptor)
+HardwareSerial a7670cSerial(1);  // Use Serial1 for A7670C (Serial2 is used for bill acceptor
+const int A7670C_RELAY_TRIGGER_PIN = 17;
 const int A7670C_RX_PIN = 25;    // A7670C RX pin (changed from 16 to 25)
 const int A7670C_TX_PIN = 26;    // A7670C TX pin (changed from 17 to 26)
 const int A7670C_CTS_PIN = 27;   // ESP32 CTS input (connect to A7670C RTS)
@@ -64,7 +65,7 @@ const unsigned long A7670C_CHECK_INTERVAL = 30000;  // Check every 30 seconds
 HardwareSerial billAcceptorSerial(2);
 
 // Watchdog and Reset Configuration
-const unsigned long RESET_INTERVAL = 720 * 60 * 1000;  // 12hrs = 720mins,  30 minutes in milliseconds
+const unsigned long RESET_INTERVAL = 180 * 60 * 1000;  // 12hrs = 720mins,  30 minutes in milliseconds
 const int WDT_TIMEOUT = 300;  // 5 minute watchdog timeout to handle HTTP data reading and internet reconnection
 unsigned long lastResetTime = 0;
 unsigned long lastWatchdogFeed = 0;
@@ -186,6 +187,20 @@ static void initializeA7670CSerial() {
   a7670cSerial.setTimeout(2000);
 }
 
+// Centralized hard reset for A7670C via relay trigger pin
+static void triggerA7670CHardReset(unsigned long holdMs = 5000) {
+  if (debugEnabled) {
+    Serial.printf("🔧 Triggering A7670C hard reset on GPIO %d for %lu ms\n", A7670C_RELAY_TRIGGER_PIN, holdMs);
+  }
+  // Drive relay: OUTPUT HIGH to cut power (NO), then back to INPUT (NC)
+  pinMode(A7670C_RELAY_TRIGGER_PIN, OUTPUT);
+  delay(10); // settle mode change
+  digitalWrite(A7670C_RELAY_TRIGGER_PIN, HIGH);
+  delay(holdMs);
+  pinMode(A7670C_RELAY_TRIGGER_PIN, INPUT);
+  delay(10);
+}
+
 void simulateA7670CWebSocketResponse() {
   // Since we're simulating the WebSocket connection for A7670C,
   // we need to simulate receiving ping responses to keep the connection alive
@@ -258,7 +273,7 @@ String sendA7670CCommand(String command, unsigned long timeout = 10000) {
     // Check if this is a critical HTTP command that should trigger immediate recovery
     bool isCriticalCommand = (command.indexOf("HTTPTERM") >= 0 || 
                               command.indexOf("HTTPINIT") >= 0 ||
-                              command.indexOf("CRESET") >= 0 ||
+                              command.indexOf("GPIO_RESET") >= 0 ||
                               command == "AT");
     
     static unsigned long lastNoResponse = 0;
@@ -291,6 +306,27 @@ String sendA7670CCommand(String command, unsigned long timeout = 10000) {
 
 
 
+
+  // Helper: Read A7670C signal strength (CSQ) as 0-31, or 99 if unknown
+  int readA7670CSignalStrength() {
+    String response = sendA7670CCommand("AT+CSQ");
+    if (response.indexOf("+CSQ:") >= 0) {
+      String csqData = extractA7670CData(response);
+      int startPos = csqData.indexOf("+CSQ:");
+      if (startPos >= 0) {
+        startPos += 6; // Skip "+CSQ: "
+        String strengthStr = csqData.substring(startPos);
+        int commaPos = strengthStr.indexOf(",");
+        if (commaPos > 0) {
+          int csq = strengthStr.substring(0, commaPos).toInt();
+          // Clamp to valid range 0-31, or return 99 when invalid
+          if (csq >= 0 && csq <= 31) return csq;
+          return 99;
+        }
+      }
+    }
+    return 99;
+  }
 
 
 // Move struct definition to the top with other global variables
@@ -638,7 +674,9 @@ public:
   }
   
   void pollForTasks() {
-    String response = sendHTTPRequestHTTPOnly("GET", "/iot/a7670c/poll/" + deviceId, "");
+    int csq = readA7670CSignalStrength();
+    String endpoint = "/iot/a7670c/poll/" + deviceId + "?sig_str=" + String(csq);
+    String response = sendHTTPRequestHTTPOnly("GET", endpoint, "");
     
     if (response.length() > 0 && (response.indexOf("\"t\"") >= 0 || response.indexOf("\"tasks\"") >= 0)) {
       processTasks(response);
@@ -1806,7 +1844,25 @@ public:
     if (response.indexOf("OK") < 0) {
       if (debugEnabled) {
         Serial.println("❌ AT+HTTPINIT failed");
+        Serial.println("🔄 Internet disconnected - triggering hard reset...");
       }
+      
+      // Trigger hard reset via helper
+      triggerA7670CHardReset(5000);
+      
+      if (debugEnabled) {
+        Serial.println("🔄 GPIO reset sent, waiting for module restart...");
+      }
+      
+      // Wait for hardware reset to complete
+      delay(A7670C_SLOW_MODE ? 25000 : 15000); // longer for stripped-down modules
+      esp_task_wdt_reset();
+      
+      // Clear buffer after reset
+      while (a7670cSerial.available()) {
+        a7670cSerial.read();
+      }
+      
       return "";
     }
     if (debugEnabled) {
@@ -2367,19 +2423,19 @@ bool checkA7670CStatus() {
   if (response.indexOf("OK") < 0) {
     if (debugEnabled) {
       Serial.println("❌ A7670C module not responding to AT command");
-      Serial.println("🔄 Attempting AT+CRESET to recover module...");
+      Serial.println("🔄 Attempting GPIO reset to recover module...");
     }
     
-    // Try AT+CRESET to recover
+    // Try GPIO reset to recover
     while (a7670cSerial.available()) {
       a7670cSerial.read();
     }
     
-    a7670cSerial.println("AT+CRESET");
-    a7670cSerial.flush();
+      // Trigger hard reset via helper
+      triggerA7670CHardReset(5000);
     
     if (debugEnabled) {
-      Serial.println("🔄 AT+CRESET sent, waiting for module restart...");
+      Serial.println("🔄 GPIO reset sent, waiting for module restart...");
     }
     
     // Wait for hardware reset to complete
@@ -2395,12 +2451,12 @@ bool checkA7670CStatus() {
     response = sendA7670CCommand("AT", A7670C_SLOW_MODE ? A7670C_DEFAULT_CMD_TIMEOUT : 5000);
     if (response.indexOf("OK") < 0) {
       if (debugEnabled) {
-        Serial.println("❌ A7670C module still not responding after AT+CRESET");
+        Serial.println("❌ A7670C module still not responding after GPIO reset");
       }
       return false;
     } else {
       if (debugEnabled) {
-        Serial.println("✅ A7670C module recovered after AT+CRESET");
+        Serial.println("✅ A7670C module recovered after GPIO reset");
       }
     }
   }
@@ -2409,16 +2465,70 @@ bool checkA7670CStatus() {
     Serial.println("✅ A7670C module responding");
   }
   
-  // Check SIM card
-  response = sendA7670CCommand("AT+CPIN?");
-  if (response.indexOf("READY") >= 0) {
-    if (debugEnabled) {
-      Serial.println("✅ SIM card ready");
+  // Check SIM card with retry loop
+  int simRetryCount = 0;
+  const int maxSimRetries = 3;
+  bool simReady = false;
+  
+  while (simRetryCount < maxSimRetries && !simReady) {
+    response = sendA7670CCommand("AT+CPIN?");
+    if (response.indexOf("READY") >= 0) {
+      if (debugEnabled) {
+        Serial.println("✅ SIM card ready");
+      }
+      simReady = true;
+    } else {
+      if (debugEnabled) {
+        Serial.println("⚠️  SIM card status: " + extractA7670CData(response));
+      }
+      
+      // Check if SIM is not inserted and trigger hard reset
+      if (response.indexOf("SIM not inserted") >= 0) {
+        simRetryCount++;
+        if (debugEnabled) {
+          Serial.println("🔄 SIM not detected - triggering hard reset... (Attempt " + String(simRetryCount) + "/" + String(maxSimRetries) + ")");
+        }
+        
+        // Trigger hard reset via helper
+        triggerA7670CHardReset(5000);
+        
+        if (debugEnabled) {
+          Serial.println("🔄 GPIO reset sent, waiting for module restart...");
+        }
+        
+        // Wait for hardware reset to complete
+        delay(A7670C_SLOW_MODE ? 25000 : 15000); // longer for stripped-down modules
+        esp_task_wdt_reset();
+        
+        // Clear buffer after reset
+        while (a7670cSerial.available()) {
+          a7670cSerial.read();
+        }
+        
+        // Test again after reset
+        response = sendA7670CCommand("AT", A7670C_SLOW_MODE ? A7670C_DEFAULT_CMD_TIMEOUT : 5000);
+        if (response.indexOf("OK") < 0) {
+          if (debugEnabled) {
+            Serial.println("❌ A7670C module still not responding after SIM reset");
+          }
+          return false;
+        } else {
+          if (debugEnabled) {
+            Serial.println("✅ A7670C module recovered after SIM reset");
+          }
+        }
+      } else {
+        // SIM error other than "not inserted" - break loop
+        break;
+      }
     }
-  } else {
+  }
+  
+  if (!simReady && simRetryCount >= maxSimRetries) {
     if (debugEnabled) {
-      Serial.println("⚠️  SIM card status: " + extractA7670CData(response));
+      Serial.println("❌ SIM card still not detected after " + String(maxSimRetries) + " reset attempts");
     }
+    return false;
   }
   
   // Check signal strength
@@ -2900,7 +3010,25 @@ void monitorA7670CConnection() {
   } else {
     if (debugEnabled) {
       Serial.println("🌐 Internet: ❌ Disconnected");
+      Serial.println("🔄 Internet disconnected - triggering hard reset...");
     }
+    
+    // Trigger hard reset via helper
+    triggerA7670CHardReset(5000);
+    
+    if (debugEnabled) {
+      Serial.println("🔄 GPIO reset sent, waiting for module restart...");
+    }
+    
+    // Wait for hardware reset to complete
+    delay(A7670C_SLOW_MODE ? 25000 : 15000); // longer for stripped-down modules
+    esp_task_wdt_reset();
+    
+    // Clear buffer after reset
+    while (a7670cSerial.available()) {
+      a7670cSerial.read();
+    }
+    
     a7670cConnected = false;
   }
 }
@@ -3776,6 +3904,7 @@ void setup() {
   // pinMode(33, INPUT);
   pinMode(BOOT_BUTTON, INPUT_PULLUP);  // Set BOOT button pin
   pinMode(LED_BUILTIN, OUTPUT);  // Initialize LED pin
+  pinMode(A7670C_RELAY_TRIGGER_PIN, INPUT);  // Initialize A7670C reset pin as INPUT (relay NC)
   Serial.begin(115200);  // Keep this one as it's needed for PWM readings output
   
   // Initialize watchdog and reset timer
@@ -4599,9 +4728,9 @@ void recoverA7670CModule() {
   a7670cConnected = false;
   webSocketConnected = false;
   
-  // Try hard reset first with AT+CRESET
+  // Try hard reset first with GPIO reset
   if (debugEnabled) {
-    Serial.println("🔄 Attempting hard reset with AT+CRESET...");
+    Serial.println("🔄 Attempting hard reset with GPIO reset...");
   }
   
   // Clear buffer before sending reset command
@@ -4609,11 +4738,11 @@ void recoverA7670CModule() {
     a7670cSerial.read();
   }
   
-  a7670cSerial.println("AT+CRESET");
-  a7670cSerial.flush();
+    // Trigger hard reset via helper
+    triggerA7670CHardReset(5000);
   
   if (debugEnabled) {
-    Serial.println("🔄 AT+CRESET sent, waiting for module to restart...");
+    Serial.println("🔄 GPIO reset sent, waiting for module to restart...");
   }
   
   // Wait for hardware reset to complete with watchdog feeding
@@ -4661,7 +4790,7 @@ void recoverA7670CModule() {
       if (testResponse.indexOf("OK") >= 0) {
         moduleResponding = true;
         if (debugEnabled) {
-          Serial.println("✅ Module responding after AT+CRESET");
+          Serial.println("✅ Module responding after GPIO reset");
         }
         break;
       }
@@ -4672,7 +4801,7 @@ void recoverA7670CModule() {
   
   if (!moduleResponding) {
     if (debugEnabled) {
-      Serial.println("⚠️ Module still not responding after AT+CRESET");
+      Serial.println("⚠️ Module still not responding after GPIO reset");
       Serial.println("🔄 Trying AT+CFUN=1,1 as fallback...");
     }
     
