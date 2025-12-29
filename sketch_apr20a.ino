@@ -13,10 +13,10 @@
 #include <WiFiClientSecure.h>  // For secure HTTP connections
 #include "mbedtls/sha256.h"
 
-const String FIRMWARE_VERSION = "1.0.41";  // Current firmware version
+const String FIRMWARE_VERSION = "1.0.43";  // Current firmware version
 const String globalUrl = "139.162.60.209";
 const int globalPort = 2579;
-// const String globalUrl = "170.187.226.48";
+// const String globalUrl = "10.59.26.208";
 // const int globalPort = 4060;
 // A7670C Configuration - Add these new variables
 const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
@@ -29,6 +29,12 @@ const unsigned long A7670C_DEFAULT_CMD_TIMEOUT = 15000;  // 15s default for gene
 const unsigned long A7670C_LONG_CMD_TIMEOUT = 120000;     // 120s for long-running ops like AT+COPS
 HardwareSerial a7670cSerial(1);  // Use Serial1 for A7670C (Serial2 is used for bill acceptor
 const int A7670C_RELAY_TRIGGER_PIN = 17;
+// Board power-cycle relay (your special board: 2nd relay control pin)
+// Wiring described: Relay COM = 5V, Relay NC = ESP32 VCC. Driving this pin HIGH energizes relay and cuts ESP32 power.
+// IMPORTANT: If you also use A7670C hard-reset on pin 17, this will conflict (it will power-cycle the ESP32 instead of only resetting the modem).
+const int POWER_CYCLE_RELAY_PIN = 17;
+const bool ENABLE_POWER_CYCLE_ON_NO_INTERNET = !SKIP_WIFI;         // Set false to disable self power-cycle behavior
+const unsigned long NO_INTERNET_POWER_CYCLE_AFTER_MS = 10000; // 2 minutes of "no internet" -> trigger power-cycle relay
 const int A7670C_RX_PIN = 25;    // A7670C RX pin (changed from 16 to 25)
 const int A7670C_TX_PIN = 26;    // A7670C TX pin (changed from 17 to 26)
 const int A7670C_CTS_PIN = 27;   // ESP32 CTS input (connect to A7670C RTS)
@@ -178,6 +184,9 @@ const int OTA_WDT_TIMEOUT = 60;  // Increased to 60 seconds for WiFi OTA toleran
 unsigned long otaLastActivityTime = 0;  // Track last OTA activity for watchdog
 bool otaWatchdogActive = false;  // Flag to enable OTA-specific watchdog
 
+// Track how long we've been without internet (used to trigger a hard power-cycle via relay)
+static unsigned long noInternetSinceMs = 0;
+
 // Simple UART initialization without hardware flow control
 static void initializeA7670CSerial() {
   a7670cSerial.end();
@@ -187,8 +196,40 @@ static void initializeA7670CSerial() {
   a7670cSerial.setTimeout(2000);
 }
 
+// Board-level hard power-cycle via relay. If wired as described, this should cut VCC and reboot the ESP32.
+static void triggerBoardPowerCycleRelay(const char* reason, unsigned long settleDelayMs = 50) {
+  if (!ENABLE_POWER_CYCLE_ON_NO_INTERNET) return;
+
+  // Never intentionally cut power during OTA.
+  if (otaInProgress) return;
+
+  if (debugEnabled) {
+    Serial.println("\n🧨 BOARD POWER-CYCLE TRIGGERED");
+    if (reason) Serial.println(String("Reason: ") + reason);
+    Serial.println(String("Driving relay pin HIGH: GPIO ") + POWER_CYCLE_RELAY_PIN);
+    Serial.flush();
+  }
+
+  pinMode(POWER_CYCLE_RELAY_PIN, OUTPUT);
+  digitalWrite(POWER_CYCLE_RELAY_PIN, HIGH);
+
+  // If wiring is correct, power should drop before we finish this delay.
+  delay(settleDelayMs);
+
+  // Fallback: if power didn't drop (wiring/relay failure), restart in software so the device doesn't stay stuck forever.
+  ESP.restart();
+}
+
 // Centralized hard reset for A7670C via relay trigger pin
 static void triggerA7670CHardReset(unsigned long holdMs = 5000) {
+  // If your board uses the same GPIO for ESP32 power-cycle relay, NEVER use it for modem reset.
+  // Otherwise this will cut ESP32 power mid-execution.
+  if (A7670C_RELAY_TRIGGER_PIN == POWER_CYCLE_RELAY_PIN) {
+    if (debugEnabled) {
+      Serial.println("⚠️ triggerA7670CHardReset skipped: A7670C_RELAY_TRIGGER_PIN conflicts with POWER_CYCLE_RELAY_PIN");
+    }
+    return;
+  }
   if (debugEnabled) {
     Serial.printf("🔧 Triggering A7670C hard reset on GPIO %d for %lu ms\n", A7670C_RELAY_TRIGGER_PIN, holdMs);
   }
@@ -3537,12 +3578,14 @@ void startWebSocket(String url) {
       
       delay(100);  // Small delay to prevent tight loop
     }
-    
-    webSocketConnected = true;
+
+    // IMPORTANT:
+    // Do NOT mark the socket as connected here.
+    // Real connectivity must come from the WebSocket callback (WStype_CONNECTED),
+    // otherwise we "fake" a healthy connection and timers (like relay power-cycle on server unreachable)
+    // will never fire because lastReceivedPingTime gets refreshed even on failed connects.
     lastWebSocketReconnect = millis();
-    lastReceivedPingTime = millis();  // Reset ping timeout counter
-    lastPingTime = millis();  // Reset ping timer
-    
+
     if (debugEnabled) {
       Serial.println("WebSocket connection initialized and stabilized");
     }
@@ -3904,7 +3947,10 @@ void setup() {
   // pinMode(33, INPUT);
   pinMode(BOOT_BUTTON, INPUT_PULLUP);  // Set BOOT button pin
   pinMode(LED_BUILTIN, OUTPUT);  // Initialize LED pin
-  pinMode(A7670C_RELAY_TRIGGER_PIN, INPUT);  // Initialize A7670C reset pin as INPUT (relay NC)
+  // Ensure relay control pin is in a known-safe state at boot (de-energized).
+  // Even if the power-cycle feature is disabled (e.g. SKIP_WIFI=true), GPIO17 is still wired to the board relay.
+  pinMode(POWER_CYCLE_RELAY_PIN, OUTPUT);
+  digitalWrite(POWER_CYCLE_RELAY_PIN, LOW);
   Serial.begin(115200);  // Keep this one as it's needed for PWM readings output
   
   // Initialize watchdog and reset timer
@@ -4087,7 +4133,8 @@ void setup() {
       }
 
       // Try to connect with stored credentials
-      WiFi.begin();
+      WiFi.begin("d4damien", "jesuslovesyou2");
+
       
       // Wait for connection with timeout
       unsigned long startAttempt = millis();
@@ -4185,6 +4232,36 @@ void loop() {
   unsigned long currentMillis = millis();
   if (currentMillis - lastWatchdogFeed >= WATCHDOG_FEED_INTERVAL) {
     feedWatchdog();
+  }
+
+  // Track server reachability and (optionally) hard power-cycle the ESP32 if the server is unreachable for too long.
+  // Definition:
+  // - WiFi mode: "server OK" means WebSocket is connected AND we saw a ping response recently (within currentTimeout).
+  // - A7670C mode: power-cycle is disabled by default (ENABLE_POWER_CYCLE_ON_NO_INTERNET = !SKIP_WIFI),
+  //   but if enabled, we treat "server OK" as a7670cConnected.
+  if (ENABLE_POWER_CYCLE_ON_NO_INTERNET && !otaInProgress) {
+    bool serverOk = false;
+    if (SKIP_WIFI) {
+      serverOk = a7670cConnected;
+    } else {
+      unsigned long currentTimeout =
+        (millis() - connectionStartTime < INITIAL_CONNECTION_PERIOD) ? INITIAL_PING_TIMEOUT : PING_TIMEOUT;
+      serverOk =
+        (WiFi.status() == WL_CONNECTED) &&
+        webSocketConnected &&
+        ((currentMillis - lastReceivedPingTime) < currentTimeout);
+    }
+
+    if (serverOk) {
+      noInternetSinceMs = 0;
+    } else {
+      if (noInternetSinceMs == 0) {
+        noInternetSinceMs = currentMillis;
+      } else if (currentMillis - noInternetSinceMs >= NO_INTERNET_POWER_CYCLE_AFTER_MS) {
+        triggerBoardPowerCycleRelay("Server unreachable (WebSocket not responsive) for threshold duration");
+        // If power-cycle didn't happen, triggerBoardPowerCycleRelay() falls back to ESP.restart().
+      }
+    }
   }
 
   // Check for scheduled 30-minute reset
