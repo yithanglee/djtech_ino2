@@ -4133,7 +4133,7 @@ void setup() {
       }
 
       // Try to connect with stored credentials
-      WiFi.begin("d4damien", "jesuslovesyou2");
+      WiFi.begin();
 
       
       // Wait for connection with timeout
