@@ -13,7 +13,8 @@
 #include <WiFiClientSecure.h>  // For secure HTTP connections
 #include "mbedtls/sha256.h"
 
-const String FIRMWARE_VERSION = "1.0.43";  // Current firmware version
+
+const String FIRMWARE_VERSION = "1.0.45";  // Current firmware version
 const String globalUrl = "139.162.60.209";
 const int globalPort = 2579;
 // const String globalUrl = "10.59.26.208";
@@ -834,7 +835,10 @@ public:
         otaDoc["firmware_version"] = o["v"] | "";
         otaDoc["download_url"] = o["u"] | "";
         otaDoc["mandatory"] = o["m"] | false;
-        sendA7670CCommand("AT+HTTPTERM", 1500);
+        // Only cleanup A7670C HTTP session when we're actually using the modem path.
+        if (SKIP_WIFI) {
+          sendA7670CCommand("AT+HTTPTERM", 1500);
+        }
         handleOTACommand(otaDoc.as<JsonObject>());
         if (debugEnabled) {
           Serial.println("🔔 OTA parameters received via minimal field 'o' and applied");
@@ -989,8 +993,11 @@ public:
         Serial.println("📡 Processing OTA update command from server");
       }
       
-      // Ensure any existing HTTP session is closed before starting OTA
-      sendA7670CCommand("AT+HTTPTERM", 1500);
+      // Ensure any existing A7670C HTTP session is closed before starting OTA,
+      // but do NOT touch the modem when we're in WiFi OTA mode.
+      if (SKIP_WIFI) {
+        sendA7670CCommand("AT+HTTPTERM", 1500);
+      }
       
       // Create a JSON object and route to the OTA handler
       StaticJsonDocument<256> otaDoc;

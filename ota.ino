@@ -285,7 +285,7 @@ static int testOptimalChunkSize(String firmwareUrl) {
   return bestSize;
 }
 
-const String globalUrlNamed = "blog.jimatlabs.com";
+const String globalUrlNamed = "blog.damienslab.com";
 const int globalPort80 = 80;
 // ... existing code ...
 String performA7670CHTTPRequest(String url) {
@@ -481,8 +481,12 @@ void performWiFiOTA(String firmwareUrl) {
   HTTPClient http;
   String fullUrl = firmwareUrl;
   if (firmwareUrl.startsWith("/")) {
-    // Prefer HTTPS by default for relative URLs; TLS is set to insecure via beginOTAHttpClient
-    fullUrl = String("https://") + globalUrlNamed + firmwareUrl;
+    // Use plain HTTP for relative URLs (port 80), and let the redirect handler upgrade to HTTPS
+    // if the server instructs it. Defaulting to HTTPS here can fail if the host doesn't serve TLS.
+    fullUrl = String("http://") + globalUrlNamed + ":" + String(globalPort80) + firmwareUrl;
+  }
+  if (debugEnabled) {
+    Serial.printf("🌐 OTA resolved URL: %s\n", fullUrl.c_str());
   }
   // Initialize client according to scheme (HTTP/HTTPS)
   if (!beginOTAHttpClient(http, fullUrl)) {
@@ -501,6 +505,9 @@ void performWiFiOTA(String firmwareUrl) {
   http.setReuse(false);
   // Try to follow redirects manually up to 3 times
   int redirectAttempts = 0;
+  if (debugEnabled) {
+    Serial.printf("🌐 OTA GET: %s\n", fullUrl.c_str());
+  }
   int httpCode = http.GET();
   while (redirectAttempts < 3 && (httpCode == HTTP_CODE_MOVED_PERMANENTLY ||
                                   httpCode == HTTP_CODE_FOUND ||
@@ -516,16 +523,19 @@ void performWiFiOTA(String firmwareUrl) {
     http.end();
     // Build absolute URL if relative, prefer HTTPS for our host
     if (location.startsWith("/")) {
-      // If previous URL was http and redirect is relative, upgrade to https for named host
-      String scheme = "https://";
-      // If we were already on https, keep https
-      if (fullUrl.startsWith("https://")) {
-        scheme = "https://";
+      // Keep scheme consistent with current URL unless server provided an absolute Location.
+      // For http we keep :80; for https we omit the port.
+      const bool useHttps = fullUrl.startsWith("https://");
+      if (useHttps) {
+        fullUrl = String("https://") + globalUrlNamed + location;
+      } else {
+        fullUrl = String("http://") + globalUrlNamed + ":" + String(globalPort80) + location;
       }
-      // Avoid appending :80 when using https
-      fullUrl = scheme + globalUrlNamed + location;
     } else {
       fullUrl = location; // Absolute URL provided by server
+    }
+    if (debugEnabled) {
+      Serial.printf("🌐 OTA redirected URL: %s\n", fullUrl.c_str());
     }
     if (!beginOTAHttpClient(http, fullUrl)) {
       if (debugEnabled) {
@@ -541,6 +551,9 @@ void performWiFiOTA(String firmwareUrl) {
     http.setConnectTimeout(OTA_WIFI_CONNECT_TIMEOUT_MS);
     http.setTimeout(OTA_WIFI_READ_TIMEOUT_MS);
     http.setReuse(false);
+    if (debugEnabled) {
+      Serial.printf("🌐 OTA GET (redirect %d): %s\n", redirectAttempts + 1, fullUrl.c_str());
+    }
     httpCode = http.GET();
     redirectAttempts++;
   }
@@ -1426,8 +1439,13 @@ void handleOTACommand(JsonObject payload) {
        if (debugEnabled) {
          Serial.printf("📡 Received OTA start command: %s\n", firmwareVersion.c_str());
        }
-       // Ensure any dangling HTTP session is terminated before OTA
-       sendA7670CCommand("AT+HTTPTERM", 1500);
+       // Only terminate A7670C HTTP session when OTA runs over cellular modem.
+       // In WiFi OTA mode (SKIP_WIFI=false), touching the modem can block OTA entirely
+       // if the module is unresponsive.
+       if (SKIP_WIFI) {
+         // Ensure any dangling HTTP session is terminated before OTA
+         sendA7670CCommand("AT+HTTPTERM", 1500);
+       }
 
        availableFirmwareVersion = firmwareVersion;
        otaDownloadUrl = downloadUrl;
