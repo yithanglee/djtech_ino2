@@ -17,7 +17,7 @@
 
 const String FIRMWARE_VERSION = "1.0.50";  // Current firmware version
 // Use hostname (grey-cloud DNS) so a server IP change is a DNS A-record update only—no OTA required.
-const String globalUrl = "iot.djtech.com";
+const String globalUrl = "blog.damienslab.com";
 const int globalPort = 2579;
 // const String globalUrl = "139.162.60.209";  // legacy direct IP
 // const String globalUrl = "10.59.26.208";
