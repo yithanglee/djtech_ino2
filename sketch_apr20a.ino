@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
@@ -14,14 +15,16 @@
 #include "mbedtls/sha256.h"
 
 
-const String FIRMWARE_VERSION = "1.0.45";  // Current firmware version
-const String globalUrl = "139.162.60.209";
+const String FIRMWARE_VERSION = "1.0.50";  // Current firmware version
+// Use hostname (grey-cloud DNS) so a server IP change is a DNS A-record update only—no OTA required.
+const String globalUrl = "iot.djtech.com";
 const int globalPort = 2579;
+// const String globalUrl = "139.162.60.209";  // legacy direct IP
 // const String globalUrl = "10.59.26.208";
 // const int globalPort = 4060;
 // A7670C Configuration - Add these new variables
 const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
-const bool SKIP_RS232 = true;  // Set to true to completely disable RS232 emulator functionality
+const bool SKIP_RS232 = false;  // Set to true to completely disable RS232 emulator functionality
 // Add: toggle for operator selection mode (auto vs manual ACTIVE_MCC_MNC)
 const bool A7670C_AUTO_OPERATOR_SELECT = true;  // true = AT+COPS=0 (auto), false = manual using ACTIVE_MCC_MNC
 // Add: slow-mode knobs for stripped-down modules
@@ -34,8 +37,8 @@ const int A7670C_RELAY_TRIGGER_PIN = 17;
 // Wiring described: Relay COM = 5V, Relay NC = ESP32 VCC. Driving this pin HIGH energizes relay and cuts ESP32 power.
 // IMPORTANT: If you also use A7670C hard-reset on pin 17, this will conflict (it will power-cycle the ESP32 instead of only resetting the modem).
 const int POWER_CYCLE_RELAY_PIN = 17;
-const bool ENABLE_POWER_CYCLE_ON_NO_INTERNET = !SKIP_WIFI;         // Set false to disable self power-cycle behavior
-const unsigned long NO_INTERNET_POWER_CYCLE_AFTER_MS = 10000; // 2 minutes of "no internet" -> trigger power-cycle relay
+const bool ENABLE_POWER_CYCLE_ON_NO_INTERNET = true;         // Set false to disable self power-cycle behavior
+const unsigned long NO_INTERNET_POWER_CYCLE_AFTER_MS = 10000; // 10 seconds of "no internet" -> trigger power-cycle relay
 const int A7670C_RX_PIN = 25;    // A7670C RX pin (changed from 16 to 25)
 const int A7670C_TX_PIN = 26;    // A7670C TX pin (changed from 17 to 26)
 const int A7670C_CTS_PIN = 27;   // ESP32 CTS input (connect to A7670C RTS)
@@ -157,6 +160,48 @@ const unsigned long INTERNET_TIMEOUT = 120000;  // Consider internet down after 
 String storedWiFiSSID = "";
 String storedWiFiPassword = "";
 bool hasStoredCredentials = false;
+
+// NVS copy of STA credentials (WiFi.SSID()/psk() are often empty before association)
+static const char kWifiCredNs[] = "wifi_creds";
+static const char kWifiKeySsid[] = "ssid";
+static const char kWifiKeyPsk[] = "psk";
+
+void persistWiFiCredentials(const String& ssid, const String& psk) {
+  storedWiFiSSID = ssid;
+  storedWiFiPassword = psk;
+  hasStoredCredentials = (ssid.length() > 0 && psk.length() > 0);
+  if (!hasStoredCredentials) {
+    return;
+  }
+  Preferences prefs;
+  if (!prefs.begin(kWifiCredNs, false)) {
+    if (debugEnabled) {
+      Serial.println("persistWiFiCredentials: Preferences begin (rw) failed");
+    }
+    return;
+  }
+  prefs.putString(kWifiKeySsid, ssid);
+  prefs.putString(kWifiKeyPsk, psk);
+  prefs.end();
+}
+
+bool loadPersistedWiFiCredentials() {
+  Preferences prefs;
+  if (!prefs.begin(kWifiCredNs, true)) {
+    return false;
+  }
+  String ssid = prefs.getString(kWifiKeySsid, "");
+  String psk = prefs.getString(kWifiKeyPsk, "");
+  prefs.end();
+  if (ssid.length() == 0 || psk.length() == 0) {
+    hasStoredCredentials = false;
+    return false;
+  }
+  storedWiFiSSID = ssid;
+  storedWiFiPassword = psk;
+  hasStoredCredentials = true;
+  return true;
+}
 
 // Network Selection Mode
 const bool USE_AUTOMATIC_NETWORK_SELECTION = true;  // Set to false to use manual network selection
@@ -3804,18 +3849,12 @@ void startSmartConfig() {
             Serial.println("\nTesting credential persistence...");
         }
 
-        // Test if credentials were actually saved and store them globally
         String savedSSID = WiFi.SSID();
         String savedPSK = WiFi.psk();
-        
-        // Store credentials globally for reconnection logic
-        storedWiFiSSID = savedSSID;
-        storedWiFiPassword = savedPSK;
-        hasStoredCredentials = (savedSSID.length() > 0 && savedPSK.length() > 0);
-        
+        persistWiFiCredentials(savedSSID, savedPSK);
         if (hasStoredCredentials) {
             if (debugEnabled) {
-                Serial.println("Credentials saved successfully and stored globally");
+                Serial.println("Credentials saved to NVS (Preferences) and RAM");
                 Serial.printf("Stored SSID: %s\n", storedWiFiSSID.c_str());
                 Serial.printf("Stored password length: %d characters\n", storedWiFiPassword.length());
             }
@@ -3914,6 +3953,8 @@ void restartSmartConfig() {
         Serial.printf("Signal Strength: %d dBm\n", WiFi.RSSI());
         Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
       }
+
+      persistWiFiCredentials(WiFi.SSID(), WiFi.psk());
       
       // Initialize internet connectivity tracking
       hasInternetConnectivity = true;
@@ -3998,6 +4039,7 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoConnect(true);
     WiFi.setAutoReconnect(true);
+    loadPersistedWiFiCredentials();
 
     if (debugEnabled) {
       Serial.println("\n=== Boot Sequence Started ===");
@@ -4084,6 +4126,8 @@ void setup() {
             Serial.printf("Signal Strength: %d dBm\n", WiFi.RSSI());
             Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
           }
+
+          persistWiFiCredentials(WiFi.SSID(), WiFi.psk());
           
           // Initialize internet connectivity tracking
           hasInternetConnectivity = true;
@@ -4118,29 +4162,21 @@ void setup() {
         }
         
         Serial.println("=== Checking Stored WiFi Credentials ===");
-        String savedSSID = WiFi.SSID();
-        String savedPSK = WiFi.psk();
-        
-        // Store credentials globally even if disconnected
-        if (savedSSID.length() > 0 && savedPSK.length() > 0) {
-          storedWiFiSSID = savedSSID;
-          storedWiFiPassword = savedPSK;
-          hasStoredCredentials = true;
-        }
-        
-        if (savedSSID.length() > 0) {
-          Serial.printf("Found stored SSID: %s\n", savedSSID.c_str());
-          Serial.printf("Stored password length: %d characters\n", savedPSK.length());
-          Serial.printf("Stored globally for reconnection logic\n");
+        if (hasStoredCredentials) {
+          Serial.printf("Found SSID in NVS (Preferences): %s\n", storedWiFiSSID.c_str());
+          Serial.printf("Password length: %d characters\n", storedWiFiPassword.length());
         } else {
-          Serial.println("No stored credentials found");
+          Serial.println("No Preferences copy yet; will try WiFi.begin() using ESP STA config if any");
         }
         
         Serial.println("\n=== WiFi Connection Attempt ===");
       }
-
-      // Try to connect with stored credentials
-      WiFi.begin();
+        Serial.println("\n=== Try with 348675Dah ===");
+      if (hasStoredCredentials) {
+        WiFi.begin(storedWiFiSSID.c_str(), storedWiFiPassword.c_str());
+      } else {
+        WiFi.begin();
+      }
 
       
       // Wait for connection with timeout
@@ -4164,10 +4200,7 @@ void setup() {
           Serial.println("\n=== Starting WebSocket Connection ===");
         }
         
-        // Store credentials globally for reconnection logic
-        storedWiFiSSID = WiFi.SSID();
-        storedWiFiPassword = WiFi.psk();
-        hasStoredCredentials = (storedWiFiSSID.length() > 0 && storedWiFiPassword.length() > 0);
+        persistWiFiCredentials(WiFi.SSID(), WiFi.psk());
         
         if (debugEnabled && hasStoredCredentials) {
           Serial.printf("Stored credentials globally - SSID: %s, Password length: %d\n", 
@@ -5043,7 +5076,7 @@ void handleInternetConnectivityLoss() {
   }
 }
 
-// Add: Manual network selection using ACTIVE_MCC_MNC instead of hardcoded Celcom
+// Add: Manual network selection using ACTIVE_MCC_MNC instead of hardcoded Celcom 348675Dah
 bool selectNetworkManual() {
   if (debugEnabled) {
     Serial.println("🎯 Selecting network (manual) using ACTIVE_MCC_MNC...");
