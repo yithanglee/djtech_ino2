@@ -14,14 +14,14 @@
 #include "mbedtls/sha256.h"
 
 
-const String FIRMWARE_VERSION = "1.0.45";  // Current firmware version
+const String FIRMWARE_VERSION = "1.0.48";  // Current firmware version
 const String globalUrl = "139.162.60.209";
 const int globalPort = 2579;
 // const String globalUrl = "10.59.26.208";
 // const int globalPort = 4060;
 // A7670C Configuration - Add these new variables
 const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
-const bool SKIP_RS232 = true;  // Set to true to completely disable RS232 emulator functionality
+const bool SKIP_RS232 = false;  // Set to true to completely disable RS232 emulator functionality
 // Add: toggle for operator selection mode (auto vs manual ACTIVE_MCC_MNC)
 const bool A7670C_AUTO_OPERATOR_SELECT = true;  // true = AT+COPS=0 (auto), false = manual using ACTIVE_MCC_MNC
 // Add: slow-mode knobs for stripped-down modules
