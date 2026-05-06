@@ -14,14 +14,111 @@
 #include <WiFiClientSecure.h>  // For secure HTTP connections
 #include "mbedtls/sha256.h"
 
-
+bool debugEnabled = true;
 const String FIRMWARE_VERSION = "1.0.50";  // Current firmware version
 // Use hostname (grey-cloud DNS) so a server IP change is a DNS A-record update only—no OTA required.
-const String globalUrl = "blog.damienslab.com";
+const String sourceUrl = "iot.damienslab.com";
+String globalUrl = "139.162.60.209";  // resolved from TXT at runtime (fallback = hostname)
 const int globalPort = 2579;
 // const String globalUrl = "139.162.60.209";  // legacy direct IP
 // const String globalUrl = "10.59.26.208";
 // const int globalPort = 4060;
+
+static unsigned long lastTxtResolveMs = 0;
+static const unsigned long TXT_RESOLVE_INTERVAL_MS = 1UL * 60UL * 1000UL; // 5 minutes
+
+static bool isValidIPv4(const String& s) {
+  int dots = 0;
+  int num = -1;
+  int digits = 0;
+  for (int i = 0; i < (int)s.length(); i++) {
+    char c = s[i];
+    if (c >= '0' && c <= '9') {
+      if (num < 0) num = 0;
+      num = num * 10 + (c - '0');
+      if (num > 255) return false;
+      digits++;
+      if (digits > 3) return false;
+    } else if (c == '.') {
+      if (num < 0) return false;
+      dots++;
+      num = -1;
+      digits = 0;
+    } else {
+      return false;
+    }
+  }
+  if (dots != 3) return false;
+  if (num < 0) return false;
+  return true;
+}
+
+static String stripTxtValue(String data) {
+  data.trim();
+  data.replace("\"", "");
+  data.trim();
+  return data;
+}
+
+static String resolveTxtToIpViaDoh(const String& name) {
+  if (WiFi.status() != WL_CONNECTED) return "";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  String url = "https://dns.google/resolve?name=" + name + "&type=TXT";
+  if (!https.begin(client, url)) return "";
+
+  int code = https.GET();
+  if (code != 200) {
+    https.end();
+    return "";
+  }
+
+  String body = https.getString();
+  https.end();
+
+  DynamicJsonDocument doc(4096);
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) return "";
+
+  JsonArray answers = doc["Answer"].as<JsonArray>();
+  if (answers.isNull()) return "";
+
+  for (JsonVariant v : answers) {
+    String data = v["data"].as<String>();
+    data = stripTxtValue(data);
+    if (isValidIPv4(data)) return data;
+  }
+
+  return "";
+}
+
+static bool refreshGlobalUrlFromTxtIfNeeded(bool force = false) {
+  Serial.println("refreshGlobalUrlFromTxtIfNeeded current ip: " + globalUrl);
+  unsigned long now = millis();
+  if (!force && lastTxtResolveMs != 0 && (now - lastTxtResolveMs) < TXT_RESOLVE_INTERVAL_MS) {
+    return false;
+  }
+
+  String ip = resolveTxtToIpViaDoh(sourceUrl);
+  lastTxtResolveMs = now;
+
+  if (ip.length() > 0) {
+    globalUrl = ip;
+    if (debugEnabled) {
+      Serial.printf("✅ Resolved TXT %s -> %s\n", sourceUrl.c_str(), globalUrl.c_str());
+    }
+    return true;
+  }
+
+  globalUrl = sourceUrl;
+  if (debugEnabled) {
+    Serial.printf("⚠️ TXT resolve failed; using hostname: %s\n", globalUrl.c_str());
+  }
+  return false;
+}
 // A7670C Configuration - Add these new variables
 const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
 const bool SKIP_RS232 = false;  // Set to true to completely disable RS232 emulator functionality
@@ -32,12 +129,15 @@ const bool A7670C_SLOW_MODE = false;  // If true, use longer timeouts and waits 
 const unsigned long A7670C_DEFAULT_CMD_TIMEOUT = 15000;  // 15s default for general AT commands
 const unsigned long A7670C_LONG_CMD_TIMEOUT = 120000;     // 120s for long-running ops like AT+COPS
 HardwareSerial a7670cSerial(1);  // Use Serial1 for A7670C (Serial2 is used for bill acceptor
-const int A7670C_RELAY_TRIGGER_PIN = 17;
-// Board power-cycle relay (your special board: 2nd relay control pin)
-// Wiring described: Relay COM = 5V, Relay NC = ESP32 VCC. Driving this pin HIGH energizes relay and cuts ESP32 power.
-// IMPORTANT: If you also use A7670C hard-reset on pin 17, this will conflict (it will power-cycle the ESP32 instead of only resetting the modem).
-const int POWER_CYCLE_RELAY_PIN = 17;
-const bool ENABLE_POWER_CYCLE_ON_NO_INTERNET = true;         // Set false to disable self power-cycle behavior
+// Relay control GPIOs
+//
+// IMPORTANT:
+// - WiFi mode (SKIP_WIFI=false): GPIO17 can be used as a board power-cut relay to reboot the ESP32.
+// - A7670C mode (SKIP_WIFI=true): GPIO17 is often needed to cut MODEM power for a true hard reset.
+//   In that case, DO NOT also use GPIO17 as a board power-cycle relay, or the ESP32 will cut its own power mid-execution.
+const int A7670C_RELAY_TRIGGER_PIN = 17; // modem power-cut relay GPIO (hard reset)
+const int POWER_CYCLE_RELAY_PIN = SKIP_WIFI ? -1 : 17; // board power-cut relay GPIO; -1 disables board power-cycle feature
+const bool ENABLE_POWER_CYCLE_ON_NO_INTERNET = !SKIP_WIFI;         // default off for modem mode
 const unsigned long NO_INTERNET_POWER_CYCLE_AFTER_MS = 10000; // 10 seconds of "no internet" -> trigger power-cycle relay
 const int A7670C_RX_PIN = 25;    // A7670C RX pin (changed from 16 to 25)
 const int A7670C_TX_PIN = 26;    // A7670C TX pin (changed from 17 to 26)
@@ -119,7 +219,6 @@ const uint8_t BILL_10 = 0x43;
 
 // Bill Acceptor state variables
 bool emulatorMode = false;  // false = command mode, true = emulator mode
-bool debugEnabled = true;
 unsigned long lastBillPollTime = 0;
 unsigned long lastBillStatusTime = 0;
 const unsigned long STATUS_INTERVAL = 100;
@@ -245,6 +344,7 @@ static void initializeA7670CSerial() {
 // Board-level hard power-cycle via relay. If wired as described, this should cut VCC and reboot the ESP32.
 static void triggerBoardPowerCycleRelay(const char* reason, unsigned long settleDelayMs = 50) {
   if (!ENABLE_POWER_CYCLE_ON_NO_INTERNET) return;
+  if (POWER_CYCLE_RELAY_PIN < 0) return;
 
   // Never intentionally cut power during OTA.
   if (otaInProgress) return;
@@ -270,7 +370,7 @@ static void triggerBoardPowerCycleRelay(const char* reason, unsigned long settle
 static void triggerA7670CHardReset(unsigned long holdMs = 5000) {
   // If your board uses the same GPIO for ESP32 power-cycle relay, NEVER use it for modem reset.
   // Otherwise this will cut ESP32 power mid-execution.
-  if (A7670C_RELAY_TRIGGER_PIN == POWER_CYCLE_RELAY_PIN) {
+  if (POWER_CYCLE_RELAY_PIN >= 0 && A7670C_RELAY_TRIGGER_PIN == POWER_CYCLE_RELAY_PIN) {
     if (debugEnabled) {
       Serial.println("⚠️ triggerA7670CHardReset skipped: A7670C_RELAY_TRIGGER_PIN conflicts with POWER_CYCLE_RELAY_PIN");
     }
@@ -3536,6 +3636,7 @@ void sendPing() {
         
     StaticJsonDocument<256> readingDoc;
     readingDoc["firmware_version"] = FIRMWARE_VERSION;
+    readingDoc["resolved_ip"] = globalUrl;
   
     String payload;
     serializeJson(readingDoc, payload);
@@ -3864,7 +3965,7 @@ void startSmartConfig() {
             }
         }
         
-        // Start WebSocket connection after successful WiFi connection
+        refreshGlobalUrlFromTxtIfNeeded(true);
         startWebSocket(globalUrl);
         startedWebsocket = true;
         webSocketConnected = true;
@@ -3997,8 +4098,10 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);  // Initialize LED pin
   // Ensure relay control pin is in a known-safe state at boot (de-energized).
   // Even if the power-cycle feature is disabled (e.g. SKIP_WIFI=true), GPIO17 is still wired to the board relay.
-  pinMode(POWER_CYCLE_RELAY_PIN, OUTPUT);
-  digitalWrite(POWER_CYCLE_RELAY_PIN, LOW);
+  if (POWER_CYCLE_RELAY_PIN >= 0) {
+    pinMode(POWER_CYCLE_RELAY_PIN, OUTPUT);
+    digitalWrite(POWER_CYCLE_RELAY_PIN, LOW);
+  }
   Serial.begin(115200);  // Keep this one as it's needed for PWM readings output
   
   // Initialize watchdog and reset timer
@@ -4134,6 +4237,7 @@ void setup() {
           lastSuccessfulPingResponse = millis();
           lastInternetCheck = millis();
           
+          refreshGlobalUrlFromTxtIfNeeded(true);
           startWebSocket(globalUrl);
           startedWebsocket = true;
           webSocketConnected = true;
@@ -4171,7 +4275,7 @@ void setup() {
         
         Serial.println("\n=== WiFi Connection Attempt ===");
       }
-        Serial.println("\n=== Try with 348675Dah ===");
+        Serial.println("\n=== Try with credentials ===");
       if (hasStoredCredentials) {
         WiFi.begin(storedWiFiSSID.c_str(), storedWiFiPassword.c_str());
       } else {
@@ -4212,6 +4316,7 @@ void setup() {
         lastSuccessfulPingResponse = millis();
         lastInternetCheck = millis();
         
+        refreshGlobalUrlFromTxtIfNeeded(true);
         startWebSocket(globalUrl);
         digitalWrite(LED_BUILTIN, HIGH);  // LED on to indicate connection
       } else {
