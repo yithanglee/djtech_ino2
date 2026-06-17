@@ -18,7 +18,8 @@ bool debugEnabled = true;
 const String FIRMWARE_VERSION = "1.0.50";  // Current firmware version
 // Use hostname (grey-cloud DNS) so a server IP change is a DNS A-record update only—no OTA required.
 const String sourceUrl = "iot.damienslab.com";
-String globalUrl = "139.162.60.209";  // resolved from TXT at runtime (fallback = hostname)
+// String globalUrl = "139.162.60.209";  // resolved from TXT at runtime (fallback = hostname)
+String globalUrl = "100.68.196.46";
 const int globalPort = 2579;
 // const String globalUrl = "139.162.60.209";  // legacy direct IP
 // const String globalUrl = "10.59.26.208";
@@ -4142,40 +4143,18 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoConnect(true);
     WiFi.setAutoReconnect(true);
+    
+    // Persist and load the specified credentials
+    persistWiFiCredentials("d4damien", "jesuslovesyou2");
     loadPersistedWiFiCredentials();
 
     if (debugEnabled) {
       Serial.println("\n=== Boot Sequence Started ===");
-      Serial.println("Checking for BOOT button press during first 10 seconds...");
-      Serial.println("Press BOOT button to enter SmartConfig mode");
+      Serial.println("Checking if BOOT button is held down to enter SmartConfig...");
     }
 
-    // Phase 1: Check for BOOT button during first 10 seconds
-    bool bootButtonPressed = false;
-    unsigned long bootCheckStart = millis();
-    digitalWrite(LED_BUILTIN, LOW);  // LED off during boot check
-    
-    while (millis() - bootCheckStart < 10000) {  // 10 second window
-      if (digitalRead(BOOT_BUTTON) == LOW) {  // Button pressed
-        bootButtonPressed = true;
-        if (debugEnabled) {
-          Serial.println("\n🔘 BOOT button pressed! Starting SmartConfig...");
-        }
-        break;
-      }
-      
-      // Show countdown every second
-      if (debugEnabled && (millis() - bootCheckStart) % 1000 == 0) {
-        int remaining = 10 - ((millis() - bootCheckStart) / 1000);
-        if (remaining > 0) {
-          Serial.print("Boot check: " + String(remaining) + "s remaining... ");
-          Serial.println("(Press BOOT for SmartConfig)");
-        }
-      }
-      
-      delay(100);
-      esp_task_wdt_reset();
-    }
+    // Phase 1: Check if BOOT button is pressed at startup (no 10-second delay)
+    bool bootButtonPressed = (digitalRead(BOOT_BUTTON) == LOW);
 
     // Phase 2: Handle SmartConfig if button was pressed
     bool smartConfigSuccess = false;
@@ -4281,6 +4260,7 @@ void setup() {
       } else {
         WiFi.begin();
       }
+
 
       
       // Wait for connection with timeout
