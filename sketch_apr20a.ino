@@ -97,28 +97,11 @@ static String resolveTxtToIpViaDoh(const String& name) {
 }
 
 static bool refreshGlobalUrlFromTxtIfNeeded(bool force = false) {
-  Serial.println("refreshGlobalUrlFromTxtIfNeeded current ip: " + globalUrl);
-  unsigned long now = millis();
-  if (!force && lastTxtResolveMs != 0 && (now - lastTxtResolveMs) < TXT_RESOLVE_INTERVAL_MS) {
-    return false;
-  }
-
-  String ip = resolveTxtToIpViaDoh(sourceUrl);
-  lastTxtResolveMs = now;
-
-  if (ip.length() > 0) {
-    globalUrl = ip;
-    if (debugEnabled) {
-      Serial.printf("✅ Resolved TXT %s -> %s\n", sourceUrl.c_str(), globalUrl.c_str());
-    }
-    return true;
-  }
-
-  globalUrl = sourceUrl;
+  globalUrl = "100.68.196.46";
   if (debugEnabled) {
-    Serial.printf("⚠️ TXT resolve failed; using hostname: %s\n", globalUrl.c_str());
+    Serial.printf("✅ Resolved TXT overridden to -> %s\n", globalUrl.c_str());
   }
-  return false;
+  return true;
 }
 // A7670C Configuration - Add these new variables
 const bool SKIP_WIFI = false;  // Set to true to use A7670C instead of WiFi
