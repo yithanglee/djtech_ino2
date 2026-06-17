@@ -20,7 +20,7 @@ const String FIRMWARE_VERSION = "1.0.50";  // Current firmware version
 const String sourceUrl = "iot.damienslab.com";
 // String globalUrl = "139.162.60.209";  // resolved from TXT at runtime (fallback = hostname)
 String globalUrl = "100.68.196.46";
-const int globalPort = 2579;
+const int globalPort = 4075;
 // const String globalUrl = "139.162.60.209";  // legacy direct IP
 // const String globalUrl = "10.59.26.208";
 // const int globalPort = 4060;
