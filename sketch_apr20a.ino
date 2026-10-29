@@ -15,12 +15,12 @@
 #include "mbedtls/sha256.h"
 
 bool debugEnabled = true;
-const String FIRMWARE_VERSION = "1.0.50";  // Current firmware version
+const String FIRMWARE_VERSION = "1.0.51";  // Current firmware version
 // Use hostname (grey-cloud DNS) so a server IP change is a DNS A-record update only—no OTA required.
 const String sourceUrl = "iot.damienslab.com";
-// String globalUrl = "139.162.60.209";  // resolved from TXT at runtime (fallback = hostname)
-String globalUrl = "100.68.196.46";
-const int globalPort = 4075;
+String globalUrl = "139.162.60.209";  // resolved from TXT at runtime (fallback = hostname)
+// String globalUrl = "192.168.1.4";
+const int globalPort = 80;
 // const String globalUrl = "139.162.60.209";  // legacy direct IP
 // const String globalUrl = "10.59.26.208";
 // const int globalPort = 4060;
@@ -97,7 +97,7 @@ static String resolveTxtToIpViaDoh(const String& name) {
 }
 
 static bool refreshGlobalUrlFromTxtIfNeeded(bool force = false) {
-  globalUrl = "100.68.196.46";
+  // globalUrl = "192.168.1.4";
   if (debugEnabled) {
     Serial.printf("✅ Resolved TXT overridden to -> %s\n", globalUrl.c_str());
   }
@@ -4128,8 +4128,8 @@ void setup() {
     WiFi.setAutoReconnect(true);
     
     // Persist and load the specified credentials
-    persistWiFiCredentials("d4damien", "jesuslovesyou2");
-    loadPersistedWiFiCredentials();
+    // persistWiFiCredentials("d4damien", "jesuslovesyou2");
+    // loadPersistedWiFiCredentials();
 
     if (debugEnabled) {
       Serial.println("\n=== Boot Sequence Started ===");
